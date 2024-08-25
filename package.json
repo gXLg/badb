@@ -1,0 +1,24 @@
+{
+  "name": "badb",
+  "version": "1.0.0",
+  "description": "Simple database with caching",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gXLg/badb.git"
+  },
+  "keywords": [
+    "database",
+    "async",
+    "cache"
+  ],
+  "author": "gXLg",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/gXLg/badb/issues"
+  },
+  "homepage": "https://github.com/gXLg/badb#readme"
+}
