@@ -1,6 +1,6 @@
 {
   "name": "badb",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Simple database with caching",
   "main": "index.js",
   "scripts": {
