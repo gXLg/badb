@@ -464,10 +464,6 @@ class BadTable {
       saveSize();
     }
 
-    this.size = () => {
-      return size;
-    };
-
     let closed = false;
     this.close = () => {
       if (closed) return;
@@ -492,6 +488,16 @@ class BadTable {
       fsLock = newLock;
       return newLock;
     }
+
+    this.size = async () => {
+      let unsaved = 0;
+      await executeFS(() => {
+        for (const { key } of lru_data) {
+          if (find(key) == -1) unsaved ++;
+        }
+      });
+      return size;
+    };
 
     return new Proxy(this, {
       "get": (target, rkey) => {
@@ -560,8 +566,8 @@ class BadSet {
     if ("maxLength" in options) v.maxLength = options.maxLength;
 
     const table = new BadTable(path, {
-      "key": "value",
-      "values": [{ "name": "value", ...v }],
+      "key": "$",
+      "values": [{ "name": "$", ...v }],
       "cacheIndex": options.cacheIndex,
       "cacheData": options.cacheData
     });
@@ -578,8 +584,8 @@ class BadSet {
       return await table[key]((e, c) => c.remove());
     }
 
-    this.size = () => {
-      return table.size();
+    this.size = async () => {
+      return await table.size();
     };
 
     this.close = () => table.close();
