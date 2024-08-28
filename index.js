@@ -123,6 +123,36 @@ function PARSE_VALUE(value, isKey) {
   return { name, type, defaultValue, maxLength };
 }
 
+class EntryControl {
+  constructor(exists) {
+    this.__exists = exists;
+    this.__removed = false;
+    this.__confirmed = false;
+  }
+
+  remove() {
+    this.__removed = true;
+    return this.__exists;
+  }
+
+  removed() {
+    return this.__removed;
+  }
+
+  confirm() {
+    this.__confirmed = true;
+    return !this.__exists;
+  }
+
+  confirmed() {
+    return this.__confirmed;
+  }
+
+  exists() {
+    return this.__exists;
+  }
+}
+
 class BadTable {
   constructor(path, options) {
     // options
@@ -301,6 +331,12 @@ class BadTable {
 
     const lru_index = [];
 
+    function saveSize() {
+      const sizeBuffer = Buffer.alloc(4);
+      sizeBuffer.writeUint32LE(size);
+      fs.writeSync(fd, sizeBuffer, 0, 4, dataFOffset - 4);
+    }
+
     function find(key, create) {
       for (let i = 0; i < lru_index.length; i ++) {
         const { "key": lkey, idx } = lru_index[i];
@@ -324,9 +360,7 @@ class BadTable {
       if (!create) return -1;
 
       size += 1;
-      const sizeBuffer = Buffer.alloc(4);
-      sizeBuffer.writeUint32LE(size);
-      fs.writeSync(fd, sizeBuffer, 0, 4, dataFOffset - 4);
+      saveSize();
       return size - 1;
     }
 
@@ -338,7 +372,7 @@ class BadTable {
         if (lkey == key) {
           if (i != 0) lru_data.unshift(lru_data.splice(i, 1)[0]);
           const obj = { ...data };
-          return obj;
+          return { obj, "exists": true };
         }
       }
 
@@ -349,7 +383,7 @@ class BadTable {
           const { defaultValue } = entries[name];
           obj[name] = defaultValue;
         }
-        return obj;
+        return { obj, "exists": false };
       }
       const rowBuffer = Buffer.alloc(rowLength);
       fs.readSync(fd, rowBuffer, 0, rowLength, dataFOffset + idx * rowLength);
@@ -365,7 +399,7 @@ class BadTable {
         save(lkey, data);
       }
 
-      return obj;
+      return { obj, "exists": true };
     };
 
     function save(key, obj) {
@@ -395,6 +429,45 @@ class BadTable {
       }
     }
 
+    function remove(key) {
+      for (let i = 0; i < lru_data.length; i ++) {
+        const { "key": lkey } = lru_data[i];
+        if (lkey == key) {
+          lru_data.splice(i, 1);
+          break;
+        }
+      }
+      for (let i = 0; i < lru_index.length; i ++) {
+        const { "key": lkey } = lru_index[i];
+        if (lkey == key) {
+          lru_index.splice(i, 1);
+          break;
+        }
+      }
+
+      const idx = find(key);
+      if (idx == -1) return;
+
+      if (size == 1) {
+        size = 0;
+        saveSize();
+        fs.ftruncateSync(fd, dataFOffset);
+        return;
+      }
+
+      const lastOffset = dataFOffset + (size - 1) * rowLength;
+      const lastRow = Buffer.alloc(rowLength);
+      fs.readSync(fd, lastRow, 0, rowLength, lastOffset);
+      fs.writeSync(fd, lastRow, 0, rowLength, dataFOffset + idx * rowLength);
+      fs.ftruncateSync(fd, lastOffset);
+      size -= 1;
+      saveSize();
+    }
+
+    this.size = () => {
+      return size;
+    };
+
     let closed = false;
     this.close = () => {
       if (closed) return;
@@ -421,21 +494,28 @@ class BadTable {
     }
 
     return new Proxy(this, {
-      "get": (target, key) => {
-        if (key in target) return target[key];
-        if (!PROVE_VALUE(keyData.type, keyData.maxLength, key)) {
-          throw new Error("The value '" + key + "' does not fit into the key");
+      "get": (target, rkey) => {
+        if (rkey in target) return target[rkey];
+        if (!PROVE_VALUE(keyData.type, keyData.maxLength, rkey)) {
+          throw new Error("The value '" + rkey + "' does not fit into the key");
         }
+        const key = keyData.type == "string" ? rkey.toString() : parseInt(rkey);
         return async callback => {
           const lock = keyLocks[key] ?? null;
           const newLock = new Promise(async (res, rej) => {
             try { await lock; } catch { }
 
             try {
-              const obj = await executeFS(() => load(key));
-              const old = { };
-              for (const name in entries) { old[name] = obj[name]; }
-              const ret = await callback(obj);
+              const { obj, exists } = await executeFS(() => load(key));
+              const old = { ...obj };
+              const control = new EntryControl(exists);
+              const ret = await callback(obj, control);
+
+              if (control.removed()) {
+                if (exists) await executeFS(() => remove(key));
+                res(ret);
+                return;
+              }
 
               let same = true;
               for (const name in entries) {
@@ -448,7 +528,7 @@ class BadTable {
                   same = false;
                 }
               }
-              if (!same) await executeFS(() => write(key, obj));
+              if (!same || (!exists && control.confirmed())) await executeFS(() => write(key, obj));
               res(ret);
 
             } catch (error) { rej(error); }
@@ -481,33 +561,26 @@ class BadSet {
 
     const table = new BadTable(path, {
       "key": "value",
-      "values": [
-        { "name": "value", ...v },
-        { "name": "present", "type": "uint8", "default": 0 }
-      ],
+      "values": [{ "name": "value", ...v }],
       "cacheIndex": options.cacheIndex,
       "cacheData": options.cacheData
     });
 
     this.has = async key => {
-      return await table[key](e => e.present == 1);
+      return await table[key]((e, c) => c.exists());
     };
 
     this.add = async key => {
-      return await table[key](e => {
-        const p = e.present;
-        e.present = 1;
-        return p == 0;
-      });
+      return await table[key]((e, c) => c.confirm());
     };
 
     this.remove = async key => {
-      return await table[key](e => {
-        const p = e.present;
-        e.present = 0;
-        return p == 1;
-      });
+      return await table[key]((e, c) => c.remove());
     }
+
+    this.size = () => {
+      return table.size();
+    };
 
     this.close = () => table.close();
   }
