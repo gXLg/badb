@@ -368,11 +368,11 @@ class BadTable {
 
     function load(key) {
       for (let i = 0; i < lru_data.length; i ++) {
-        const { "key": lkey, data } = lru_data[i];
+        const { "key": lkey, raw, data } = lru_data[i];
         if (lkey == key) {
           if (i != 0) lru_data.unshift(lru_data.splice(i, 1)[0]);
           const obj = { ...data };
-          return { obj, "exists": true };
+          return { obj, "exists": true, raw };
         }
       }
 
@@ -383,8 +383,9 @@ class BadTable {
           const { defaultValue } = entries[name];
           obj[name] = defaultValue;
         }
-        return { obj, "exists": false };
+        return { obj, "exists": false, "raw": true };
       }
+      const raw = false;
       const rowBuffer = Buffer.alloc(rowLength);
       fs.readSync(fd, rowBuffer, 0, rowLength, dataFOffset + idx * rowLength);
       const obj = { };
@@ -393,13 +394,13 @@ class BadTable {
         obj[name] = READ(rowBuffer, type, offset);
       }
 
-      lru_data.unshift({ key, "data": { ...obj }});
+      lru_data.unshift({ key, raw, "data": { ...obj }});
       if (lru_data.length > lru_data_max) {
         const { "key": lkey, data } = lru_data.pop();
         save(lkey, data);
       }
 
-      return { obj, "exists": true };
+      return { obj, raw, "exists": true };
     };
 
     function save(key, obj) {
@@ -413,16 +414,16 @@ class BadTable {
       fs.writeSync(fd, rowBuffer, 0, rowLength, dataFOffset + idx * rowLength);
     }
 
-    function write(key, obj) {
+    function write(key, obj, raw) {
       for (let i = 0; i < lru_data.length; i ++) {
         const { "key": lkey } = lru_data[i];
         if (lkey == key) {
           lru_data.splice(i, 1);
-          lru_data.unshift({ key, "data": { ...obj }});
+          lru_data.unshift({ key, raw, "data": { ...obj }});
           return;
         }
       }
-      lru_data.unshift({ key, "data": { ...obj }});
+      lru_data.unshift({ key, raw, "data": { ...obj }});
       if (lru_data.length > lru_data_max) {
         const { "key": lkey, data } = lru_data.pop();
         save(lkey, data);
@@ -489,14 +490,12 @@ class BadTable {
       return newLock;
     }
 
-    this.size = async () => {
+    this.size = () => {
       let unsaved = 0;
-      await executeFS(() => {
-        for (const { key } of lru_data) {
-          if (find(key) == -1) unsaved ++;
-        }
-      });
-      return size;
+      for (const { raw } of lru_data) {
+        if (raw) unsaved ++;
+      }
+      return size + unsaved;
     };
 
     return new Proxy(this, {
@@ -512,7 +511,7 @@ class BadTable {
             try { await lock; } catch { }
 
             try {
-              const { obj, exists } = await executeFS(() => load(key));
+              const { obj, raw, exists } = await executeFS(() => load(key));
               const old = { ...obj };
               const control = new EntryControl(exists);
               const ret = await callback(obj, control);
@@ -524,6 +523,7 @@ class BadTable {
               }
 
               let same = true;
+              const final = { };
               for (const name in entries) {
                 const { type, defualtValue, maxLength } = entries[name];
                 const value = obj[name] ?? defaultValue;
@@ -533,8 +533,9 @@ class BadTable {
                 if (value != old[name]) {
                   same = false;
                 }
+                final[name] = value;
               }
-              if (!same || (!exists && control.confirmed())) await executeFS(() => write(key, obj));
+              if (!same || (!exists && control.confirmed())) await executeFS(() => write(key, final, raw));
               res(ret);
 
             } catch (error) { rej(error); }
@@ -584,8 +585,8 @@ class BadSet {
       return await table[key]((e, c) => c.remove());
     }
 
-    this.size = async () => {
-      return await table.size();
+    this.size = () => {
+      return table.size();
     };
 
     this.close = () => table.close();
