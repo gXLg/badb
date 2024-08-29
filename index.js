@@ -525,7 +525,7 @@ class BadTable {
               let same = true;
               const final = { };
               for (const name in entries) {
-                const { type, defualtValue, maxLength } = entries[name];
+                const { type, defaultValue, maxLength } = entries[name];
                 const value = obj[name] ?? defaultValue;
                 if (!PROVE_VALUE(type, maxLength, value)) {
                   throw new Error("The value '" + value + "' does not fit into the field '" + name + "'");
