@@ -203,13 +203,13 @@ class BadTable {
       throw new Error("'values' must be an array");
     }
 
-    const lru_index_max = options.indexCache ?? 1024;
+    const lru_index_max = options.cacheIndex ?? 1024;
     if (typeof lru_index_max != "number" || lru_index_max < 0) {
-      throw new Error("'indexCache' must be a positive number");
+      throw new Error("'cacheIndex' must be a non-negative number");
     }
-    const lru_data_max = options.indexData ?? 64;
+    const lru_data_max = options.cacheData ?? 64;
     if (typeof lru_data_max != "number" || lru_data_max < 0) {
-      throw new Error("'indexData' must be a positive number");
+      throw new Error("'cacheData' must be a non-negative number");
     }
 
     let namesLength = 2;
@@ -341,7 +341,7 @@ class BadTable {
       for (let i = 0; i < lru_index.length; i ++) {
         const { "key": lkey, idx } = lru_index[i];
         if (lkey == key) {
-          lru_index.unshift(lru_index.splice(i, 1)[0]);
+          if (i != 0) lru_index.unshift(lru_index.splice(i, 1)[0]);
           return idx;
         }
       }
@@ -361,15 +361,21 @@ class BadTable {
 
       size += 1;
       saveSize();
+      lru_index.unshift({ key, "idx": size - 1 });
+      if (lru_index.length > lru_index_max) lru_index.pop();
       return size - 1;
     }
 
+    // key - the key of the element
+    // data - the data row
+    // raw - true if the element does not exist physically
     const lru_data = [];
 
     function load(key) {
       for (let i = 0; i < lru_data.length; i ++) {
         const { "key": lkey, raw, data } = lru_data[i];
         if (lkey == key) {
+          // bring to front
           if (i != 0) lru_data.unshift(lru_data.splice(i, 1)[0]);
           const obj = { ...data };
           return { obj, "exists": true, raw };
@@ -396,6 +402,7 @@ class BadTable {
 
       lru_data.unshift({ key, raw, "data": { ...obj }});
       if (lru_data.length > lru_data_max) {
+        // save dropped element
         const { "key": lkey, data } = lru_data.pop();
         save(lkey, data);
       }
@@ -425,6 +432,7 @@ class BadTable {
       }
       lru_data.unshift({ key, raw, "data": { ...obj }});
       if (lru_data.length > lru_data_max) {
+        // save dropped element
         const { "key": lkey, data } = lru_data.pop();
         save(lkey, data);
       }
@@ -438,6 +446,12 @@ class BadTable {
           break;
         }
       }
+
+      // if not physically exist, no need to remove
+      const idx = find(key);
+      if (idx == -1) return;
+
+      // remove the element from index cache
       for (let i = 0; i < lru_index.length; i ++) {
         const { "key": lkey } = lru_index[i];
         if (lkey == key) {
@@ -446,9 +460,7 @@ class BadTable {
         }
       }
 
-      const idx = find(key);
-      if (idx == -1) return;
-
+      // if only one element, then it is the one we are removing
       if (size == 1) {
         size = 0;
         saveSize();
@@ -456,13 +468,24 @@ class BadTable {
         return;
       }
 
+      // when removing an element, swap with the last element
+      // instead of rewriting everything and truncate the file
       const lastOffset = dataFOffset + (size - 1) * rowLength;
       const lastRow = Buffer.alloc(rowLength);
       fs.readSync(fd, lastRow, 0, rowLength, lastOffset);
       fs.writeSync(fd, lastRow, 0, rowLength, dataFOffset + idx * rowLength);
       fs.ftruncateSync(fd, lastOffset);
-      size -= 1;
+      size --;
       saveSize();
+      // if the last row was in cache, update its' index
+      const movedKey = READ(lastRow, keyData.type, 0);
+      for (let i = 0; i < lru_index.length; i ++) {
+        const { "key": lkey } = lru_index[i];
+        if (lkey == movedKey) {
+          lru_index[i].idx = idx;
+          break;
+        }
+      }
     }
 
     let closed = false;
