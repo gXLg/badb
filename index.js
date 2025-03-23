@@ -470,22 +470,25 @@ class BadTable {
 
       // when removing an element, swap with the last element
       // instead of rewriting everything and truncate the file
+      // but don't swap if the removed row is last itself
       const lastOffset = dataFOffset + (size - 1) * rowLength;
-      const lastRow = Buffer.alloc(rowLength);
-      fs.readSync(fd, lastRow, 0, rowLength, lastOffset);
-      fs.writeSync(fd, lastRow, 0, rowLength, dataFOffset + idx * rowLength);
+      if (idx != size - 1) {
+        const lastRow = Buffer.alloc(rowLength);
+        fs.readSync(fd, lastRow, 0, rowLength, lastOffset);
+        fs.writeSync(fd, lastRow, 0, rowLength, dataFOffset + idx * rowLength);
+        // if the last row was in cache, update its' index
+        const movedKey = READ(lastRow, keyData.type, 0);
+        for (let i = 0; i < lru_index.length; i ++) {
+          const { "key": lkey } = lru_index[i];
+          if (lkey == movedKey) {
+            lru_index[i].idx = idx;
+            break;
+          }
+        }
+      }
       fs.ftruncateSync(fd, lastOffset);
       size --;
       saveSize();
-      // if the last row was in cache, update its' index
-      const movedKey = READ(lastRow, keyData.type, 0);
-      for (let i = 0; i < lru_index.length; i ++) {
-        const { "key": lkey } = lru_index[i];
-        if (lkey == movedKey) {
-          lru_index[i].idx = idx;
-          break;
-        }
-      }
     }
 
     let closed = false;
@@ -597,15 +600,15 @@ class BadSet {
     });
 
     this.has = async key => {
-      return await table[key]((e, c) => c.exists());
+      return await table[key]((_, c) => c.exists());
     };
 
     this.add = async key => {
-      return await table[key]((e, c) => c.confirm());
+      return await table[key]((_, c) => c.confirm());
     };
 
     this.remove = async key => {
-      return await table[key]((e, c) => c.remove());
+      return await table[key]((_, c) => c.remove());
     }
 
     this.size = () => {
@@ -616,4 +619,124 @@ class BadSet {
   }
 }
 
-module.exports = { BadTable, BadSet };
+class BadArrayTable {
+  constructor(path, options) {
+    // options
+    // similar to BadTable, but without key
+    // key will be given by the class
+
+    if (options == null) {
+      throw new Error("Options must be passed to the constructor");
+    }
+
+    const key = options.key;
+    if ("key" in options) {
+      throw new Error("'key' can not be chosen in the list");
+    }
+
+    if (!("maxKeyLength" in options)) {
+      throw new Error("The max key length must be specified in the list");
+    }
+
+    const values = options.values;
+    if (values == null) {
+      throw new Error("'values' must be present in the database");
+    }
+    if (values.constructor != [].constructor) {
+      throw new Error("'values' must be an array");
+    }
+
+    const opt = {
+      "key": "$", "cacheIndex": options.cacheIndex, "cacheData": options.cacheData,
+      "values": [
+        { "name": "$", "maxLength": options.maxKeyLength + 4 },
+        ...options.values
+      ]
+    };
+
+    const table = new BadTable(path, opt);
+    this.size = () => {
+      return table.size();
+    };
+    this.close = () => table.close();
+
+    const keyLocks = {};
+
+    return new Proxy(this, {
+      "get": (target, key) => {
+        if (key in target) return target[key];
+        return async callback => {
+          const lock = keyLocks[key] ?? null;
+          const newLock = new Promise(async (res, rej) => {
+            try { await lock; } catch { }
+
+            try {
+              const array = [];
+              let index = 0;
+              while (true) {
+                const a = index.toString(36).padStart(4, "0");
+                const ex = await table[key + a]((e, c) => {
+                  if (!c.exists()) return false;
+                  array.push(e);
+                  return true;
+                });
+                if (!ex || index == 1679615) break;
+                index ++;
+              }
+              const aold = array.map(e => ({ ...e }));
+              const ret = await callback(array);
+
+              // handle updates and removal
+              index = 0;
+              for (const old of aold) {
+                // removal
+                if (index >= array.length) {
+                  const a = index.toString(36).padStart(4, "0");
+                  await table[key + a]((_, c) => c.remove());
+                  index ++;
+                  continue;
+                }
+
+                let same = true;
+                const elem = array[index];
+                for (const name in old) {
+                  if (old[name] != elem[name]) {
+                    same = false;
+                    break;
+                  }
+                }
+                if (!same) {
+                  const a = index.toString(36).padStart(4, "0");
+                  await table[key + a](e => {
+                    for (const name in elem) {
+                      e[name] = elem[name];
+                    }
+                  });
+                }
+                index ++;
+              }
+              // handle appends
+              while (index < array.length && index < 1679616) {
+                const elem = array[index];
+                const a = index.toString(36).padStart(4, "0");
+                await table[key + a](e => {
+                  for (const name in elem) {
+                    e[name] = elem[name];
+                  }
+                });
+                index ++;
+              }
+
+              res(ret);
+
+            } catch (error) { rej(error); }
+          });
+          keyLocks[key] = newLock;
+          return newLock;
+        };
+      }
+    });
+  }
+}
+
+module.exports = { BadTable, BadSet, BadArrayTable };
