@@ -739,4 +739,31 @@ class BadArrayTable {
   }
 }
 
-module.exports = { BadTable, BadSet, BadArrayTable };
+class BadArray extends Function {
+  constructor(path, options) {
+    super();
+
+    const array = new BadArrayTable(path, {
+      "maxKeyLength": 0,
+      ...options
+    });
+
+    this.size = () => {
+      return array.size();
+    };
+
+    return new Proxy(this, {
+      "apply": (target, thisArg, args) => {
+        const callback = args[0];
+        return new Promise(async res => {
+          res(await array[""](callback));
+        });
+      }
+    });
+  }
+}
+
+function createSingleArray(path, options) {
+}
+
+module.exports = { BadTable, BadSet, BadArrayTable, BadArray };
