@@ -662,6 +662,18 @@ class BadArrayTable {
 
     const keyLocks = {};
 
+    const base = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[]^_`{|}~";
+    const maxIndex = base.length ** 4;
+    function num2idx(num) {
+      if (num >= maxIndex) throw new Error("Invalid index: " + num);
+      let idx = "";
+      while (num) {
+        idx += base[num % base.length];
+        num = parseInt(num / base.length);
+      }
+      return idx.padStart(4, "0");
+    }
+
     return new Proxy(this, {
       "get": (target, key) => {
         if (key in target) return target[key];
@@ -674,13 +686,13 @@ class BadArrayTable {
               const array = [];
               let index = 0;
               while (true) {
-                const a = index.toString(36).padStart(4, "0");
-                const ex = await table[key + a]((e, c) => {
+                const a = num2idx(index);
+                const ex = await table[a + key]((e, c) => {
                   if (!c.exists()) return false;
                   array.push(e);
                   return true;
                 });
-                if (!ex || index == 1679615) break;
+                if (!ex || index == maxIndex) break;
                 index ++;
               }
               const aold = array.map(e => ({ ...e }));
@@ -691,8 +703,8 @@ class BadArrayTable {
               for (const old of aold) {
                 // removal
                 if (index >= array.length) {
-                  const a = index.toString(36).padStart(4, "0");
-                  await table[key + a]((_, c) => c.remove());
+                  const a = num2idx(index);
+                  await table[a + key]((_, c) => c.remove());
                   index ++;
                   continue;
                 }
@@ -706,8 +718,8 @@ class BadArrayTable {
                   }
                 }
                 if (!same) {
-                  const a = index.toString(36).padStart(4, "0");
-                  await table[key + a](e => {
+                  const a = num2idx(index);
+                  await table[a + key](e => {
                     for (const name in elem) {
                       e[name] = elem[name];
                     }
@@ -716,10 +728,10 @@ class BadArrayTable {
                 index ++;
               }
               // handle appends
-              while (index < array.length && index < 1679616) {
+              while (index < array.length && index <= maxIndex) {
                 const elem = array[index];
-                const a = index.toString(36).padStart(4, "0");
-                await table[key + a](e => {
+                const a = num2idx(index);
+                await table[a + key](e => {
                   for (const name in elem) {
                     e[name] = elem[name];
                   }
@@ -744,8 +756,8 @@ class BadArray extends Function {
     super();
 
     const array = new BadArrayTable(path, {
-      "maxKeyLength": 0,
-      ...options
+      ...options,
+      "maxKeyLength": 0
     });
 
     this.size = () => {
